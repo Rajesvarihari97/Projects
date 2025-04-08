@@ -1,0 +1,45 @@
+import ccxt
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+
+# Connect to Binance (no authentication needed for public data)
+exchange = ccxt.binance({
+    'enableRateLimit': True,
+    'options': {'adjustForTimeDifference': True}
+})
+
+# Choose quote currency and time window
+FIAT = 'EUR'
+LOOKBACK_DAYS = 7
+
+# Load markets and filter EUR pairs
+markets = exchange.load_markets()
+eur_pairs = [symbol for symbol in markets if symbol.endswith(f"/{FIAT}") and markets[symbol]['active']]
+
+# Prepare results
+volatility_results = []
+
+for symbol in eur_pairs:
+    try:
+        # Fetch daily historical prices
+        now = exchange.milliseconds()
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1d', since=now - LOOKBACK_DAYS * 86400 * 1000)
+
+        if len(ohlcv) < LOOKBACK_DAYS:
+            continue
+
+        # Convert to DataFrame
+        df = pd.DataFrame(ohlcv, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+
+        # Calculate daily returns
+        df['Return'] = df['Close'].pct_change()
+
+        # Calculate standard deviation of returns (volatility)
+        volatility = df['Return'].std()
+
+        # Append results
+        volatility_results.append((symbol, round(volatility, 4)))
+    
+    except Exception as e:
+        continue
