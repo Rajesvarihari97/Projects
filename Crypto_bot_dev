@@ -1,110 +1,101 @@
-
-
 import pandas as pd
 import ccxt
 import numpy as np
 from datetime import datetime, timedelta
 
-# =============================================
-# Exchange Configuration
-# =============================================
+# ============================
+# Exchange Setup
+# ============================
 exchange = ccxt.binance({
     'enableRateLimit': True,
     'options': {'adjustForTimeDifference': True}
 })
-fiat_currency = "EUR"
-min_profit_target = 0.02
-maximum_trade_value = 100
-variance_threshold = 0.03 #used as the selector to observe the variation of movements compared against past two days
-# Load market data with active pair validation
+
+# ============================
+# Configurable Parameters
+# ============================
+FIAT = "EUR"
+PROFIT_TARGET = 0.02
+MAX_TRADE_EUR = 100
+VARIANCE_THRESHOLD = 0.03
+
+# ============================
+# Market Filter
+# ============================
 try:
     markets = exchange.load_markets()
-    active_pairs = [symbol for symbol, market in markets.items() 
-                   if market['active'] and symbol.endswith(f"/{fiat_currency}")]
+    active_pairs = [
+        s for s, m in markets.items()
+        if m['active'] and s.endswith(f"/{FIAT}")
+    ]
 except Exception as e:
     print(f"Error loading markets: {e}")
     raise SystemExit
 
-# Symbol corrections for renamed/delisted pairs
+# ============================
+# Symbol Corrections
+# ============================
 SYMBOL_MAPPING = {
     'BTT/EUR': 'BTTC/EUR',
     'RNDR/EUR': 'RENDER/EUR',
     'FTM/EUR': 'S/EUR',
-    'GAL/EUR': 'G/EUR',
-    'MC/EUR': 'BEAMX/EUR',
-    'RAMP/EUR': 'LEVER/EUR',
-    'OLEA/EUR': 'SECU/EUR',
-    'ERN/EUR': 'EPIC/EUR',
-    'LUMOS/EUR': 'SONIC/EUR',
 }
 
 DELISTED_PAIRS = {
-    'CHZ/EUR', 'ID/EUR', 'MDT/BTC', 'MLN/BTC', 'ROSE/ETH', 'VIB/BTC',
-    'VIC/BTC', 'XAI/BTC', 'GFT/USDT', 'IRIS/BTC', 'IRIS/USDT', 'KEY/USDT',
-    'OAX/BTC', 'OAX/USDT', 'REN/BTC', 'REN/USDT', 'APE/ETH', 'ATOM/BNB',
-    'BAL/BTC', 'BNB/DAI'
+    'CHZ/EUR', 'ID/EUR', 'MDT/BTC'
 }
 
-# =============================================
-# Technical Indicators
-# =============================================
+# ============================
+# Indicators
+# ============================
 def calculate_indicators(df):
     if len(df) < 25:
         return pd.DataFrame()
-    
-    try:
-        df['3_EMA'] = df['Close'].ewm(span=3, adjust=False).mean()
-        df['10_EMA'] = df['Close'].ewm(span=5, adjust=False).mean()
-        
-        delta = df['Close'].diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = -delta.where(delta < 0, 0.0)
-        avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-        avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-        df['RSI'] = 100 - (100 / (1 + (avg_gain / avg_loss)))
-        
-        df['5_Avg_Volume'] = df['Volume'].rolling(5).mean().replace(0, 1e-9)
-        df['Volume_Ratio'] = df['Volume'] / df['5_Avg_Volume']
-        
-        df['TR'] = np.maximum(df['High'] - df['Low'],
-                            np.maximum(abs(df['High'] - df['Close'].shift()),
-                            abs(df['Low'] - df['Close'].shift())))
-        df['ATR'] = df['TR'].ewm(span=14, adjust=False).mean()
-        
-        return df.dropna()
-    except Exception as e:
-        print(f"Indicator error: {e}")
-        return pd.DataFrame()
 
-# =============================================
-# Market Trend Check (BTC Analysis)
-# =============================================
+    df['3_EMA'] = df['Close'].ewm(span=3, adjust=False).mean()
+    df['10_EMA'] = df['Close'].ewm(span=5, adjust=False).mean()
+
+    delta = df['Close'].diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    df['RSI'] = 100 - (100 / (1 + (avg_gain / avg_loss)))
+
+    df['5_Avg_Volume'] = df['Volume'].rolling(5).mean().replace(0, 1e-9)
+    df['Volume_Ratio'] = df['Volume'] / df['5_Avg_Volume']
+
+    df['TR'] = np.maximum(df['High'] - df['Low'],
+                          np.maximum(abs(df['High'] - df['Close'].shift()),
+                                     abs(df['Low'] - df['Close'].shift())))
+    df['ATR'] = df['TR'].ewm(span=14, adjust=False).mean()
+
+    return df.dropna()
+
+# ============================
+# Market Trend
+# ============================
 def get_market_trend():
     try:
         btc_price = exchange.fetch_ticker('BTC/EUR')['close']
         btc_weekly = exchange.fetch_ohlcv('BTC/EUR', '1w', limit=4)
-        weekly_change = (btc_price - btc_weekly[0][1]) / btc_weekly[0][1]
-        
-        if weekly_change > 0.1:
+        change = (btc_price - btc_weekly[0][1]) / btc_weekly[0][1]
+
+        if change > 0.1:
             return 'bullish'
-        elif weekly_change < -0.1:
+        elif change < -0.1:
             return 'bearish'
         return 'neutral'
     except:
         return 'neutral'
 
-market_trend = get_market_trend()
-print(f"Market trend identified: {market_trend}")
-
-# =============================================
-# ATR Threshold Calculation
-# =============================================
+# ============================
+# ATR Threshold (percentile-based)
+# ============================
 def calculate_atr_threshold():
     atr_values = []
-    
     now = exchange.milliseconds()
 
-    # Fetch all OHLCV data in one batch to reduce API calls
     all_ohlcv = {
         symbol: exchange.fetch_ohlcv(symbol, '1d', since=now - 30*86400*1000, limit=30)
         for symbol in active_pairs
@@ -113,129 +104,96 @@ def calculate_atr_threshold():
     for symbol, ohlcv in all_ohlcv.items():
         try:
             df = pd.DataFrame(ohlcv, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
-            
-            if len(df) < 14: 
+
+            if len(df) < 14:
                 continue
 
             df['TR'] = np.maximum(df['High'] - df['Low'],
-                                np.maximum(abs(df['High'] - df['Close'].shift()),
-                                abs(df['Low'] - df['Close'].shift())))
+                                  np.maximum(abs(df['High'] - df['Close'].shift()),
+                                             abs(df['Low'] - df['Close'].shift())))
             df['ATR'] = df['TR'].ewm(span=14, adjust=False).mean()
-            
-            df['ATR'].dropna(inplace=True) 
-            
-            if not df.empty:
-                atr_values.append(df['ATR'].iloc[-1])  
 
-        except Exception as e:
-            print(f"⚠ Error processing {symbol}: {e}")
+            if not df.empty:
+                atr_values.append(df['ATR'].dropna().iloc[-1])
+        except:
             continue
 
-    if atr_values:
-        return np.percentile(atr_values, 25)  
-    
-    return 0.002  
+    return np.percentile(atr_values, 25) if atr_values else 0.002
 
-ATR_THRESHOLD = calculate_atr_threshold()
-print(f"Calculated ATR Threshold: {ATR_THRESHOLD:.6f}")
-
-# =============================================
-# Real-Time Market Analysis
-# =============================================
+# ============================
+# Real-Time Opportunity Scan
+# ============================
 def analyze_real_time():
     results = []
-    
+    trend = get_market_trend()
+    atr_threshold = calculate_atr_threshold()
+
     for symbol in active_pairs:
         try:
-            original_symbol = symbol
-            symbol = SYMBOL_MAPPING.get(symbol, symbol)
-            
-            if symbol in DELISTED_PAIRS:
+            mapped_symbol = SYMBOL_MAPPING.get(symbol, symbol)
+            if mapped_symbol in DELISTED_PAIRS:
                 continue
-                
+
             now = exchange.milliseconds()
-            ohlcv = exchange.fetch_ohlcv(symbol, '1d', since=now - 30*86400*1000, limit=30)
-            
+            ohlcv = exchange.fetch_ohlcv(mapped_symbol, '1d', since=now - 30*86400*1000, limit=30)
+
             if len(ohlcv) < 25:
                 continue
-                
+
             df = pd.DataFrame(ohlcv, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
             df = calculate_indicators(df)
-            
             if df.empty:
                 continue
-                
+
             latest = df.iloc[-1]
-            yesterday_high = df.iloc[-2]["High"] 
-            ticker = exchange.fetch_ticker(symbol)
-            current_price = ticker['close']
-            price_deviation = abs(latest['Close'] - current_price)/current_price
-            
+            current_price = exchange.fetch_ticker(mapped_symbol)['close']
+            price_deviation = abs(latest['Close'] - current_price) / current_price
             if price_deviation > 0.15:
                 continue
 
-            # Compute rolling standard deviation over the last 5 days
-            df["Close_StdDev"] = df["Close"].rolling(window=5).std()
+            # Volatility control via Coefficient of Variation (CV)
+            df['Close_StdDev'] = df['Close'].rolling(window=5).std()
+            avg_std = max(df['Close_StdDev'].iloc[-2:].mean(), 1e-9)
+            highest_5d = max(df['High'].rolling(window=5).max().iloc[-1], 1e-9)
 
-            # Take the average standard deviation over the last 2 days
-            avg_stddev_last_2_days = max(df["Close_StdDev"].iloc[-2:].mean(), 1e-9)
-
-            # Set Coefficient of Variation (CV) threshold
-            cv_threshold = variance_threshold  # 3% max allowed
-
-            # Compute CV for Close, Entry, and Take Profit
-            latest_close = max(df["Close"].iloc[-1], 1e-9)
-            highest_last_5_days = max(df["High"].rolling(window=5).max().iloc[-1], 1e-9)  # Highest price in last 5 days
-
-            cv_close = avg_stddev_last_2_days / latest_close
-            cv_take_profit = avg_stddev_last_2_days / highest_last_5_days
-
-            # Apply CV filters in one step
-            if cv_close > cv_threshold  or cv_take_profit > cv_threshold:
+            cv_close = avg_std / latest['Close']
+            cv_profit = avg_std / highest_5d
+            if cv_close > VARIANCE_THRESHOLD or cv_profit > VARIANCE_THRESHOLD:
                 continue
 
-
+            # Filtering conditions
             conditions = {
-                "ema_crossover": bool(latest['3_EMA'] > latest['10_EMA']),
-                "rsi_range": bool((38 < latest["RSI"] < 80) if market_trend == "bullish" else (30 < latest["RSI"] < 65)),
-                "volume_surge": bool(latest['Volume_Ratio'] > 1.3), 
-                #"price_above_ema": latest['Close'] > latest['10_EMA'],
-                "atr_threshold": bool(latest["ATR"] > ATR_THRESHOLD),  
-                #"atr_threshold": latest["ATR"] > 0.003,  
-                "atr_breakout": bool((latest["High"] - latest["Low"]) >= latest["ATR"] and (latest["High"] - latest["Low"]) <= (latest["ATR"] * 1.5))  
+                "ema_crossover": latest['3_EMA'] > latest['10_EMA'],
+                "rsi_ok": (38 < latest["RSI"] < 80) if trend == "bullish" else (30 < latest["RSI"] < 65),
+                "volume_spike": latest['Volume_Ratio'] > 1.3,
+                "atr_valid": latest["ATR"] > atr_threshold,
+                "atr_breakout": latest["High"] - latest["Low"] >= latest["ATR"]
             }
-            
-            if sum(conditions.values()) >= 3 and current_price <= maximum_trade_value and current_price <= (yesterday_high  * (1-(min_profit_target+0.01))):
-                atr = latest['ATR']
+
+            if sum(conditions.values()) >= 3 and current_price <= MAX_TRADE_EUR:
                 entry = current_price
-                stop_loss = entry - (atr * 2)
-                take_profit = entry * (1 + min_profit_target)
-                
+                atr = latest['ATR']
+                stop = entry - (atr * 2)
+                target = entry * (1 + PROFIT_TARGET)
+
                 results.append({
-                    "Symbol": symbol,
-                    "Entry_Price": entry,
-                    "Stop_Loss": round(stop_loss, 4),
-                    "Take_Profit": round(take_profit, 4),
+                    "Symbol": mapped_symbol,
+                    "Entry": entry,
+                    "Stop_Loss": round(stop, 4),
+                    "Take_Profit": round(target, 4),
                     "RSI": round(latest['RSI'], 2),
                     "ATR": round(atr, 4),
-                    "Volume_Ratio": round(latest['Volume_Ratio'], 1)
+                    "Vol_Ratio": round(latest['Volume_Ratio'], 1)
                 })
-                
-        except Exception as e:
+        except:
             continue
-            
+
     return pd.DataFrame(results)
 
-# =============================================
-# Execution
-# =============================================
+# ============================
+# Run it
+# ============================
 if __name__ == "__main__":
-    try:
-        df = analyze_real_time()
-        if not df.empty:
-            df.to_csv("valid_opportunities.csv", index=False)
-            print(df)
-        else:
-            print("No valid opportunities found")
-    except Exception as e:
-        print(f"Execution error: {e}")
+    df = analyze_real_time()
+    if not df.empty:
+        df.to_csv("opportunities.csv", index=False)
